@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SQL Lineage Explorer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    :root { --bg:#f3f4f6; --panel:#fff; --fg:#0f172a; --muted:#6b7280; --border:#e5e7eb; --accent:#111827; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+    header { padding: 10px 16px; background: #111827; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.2); display:flex; gap:12px; align-items:center; }
+    header .grow { flex:1; }
+    header input[type=file] { color:#fff; }
+    header .ctrl { display:flex; gap:8px; align-items:center; }
+    .layout { display:grid; grid-template-areas: 'sidebar canvas inspector' 'drawer drawer drawer'; grid-template-columns: 280px 1fr 340px; grid-template-rows: 1fr 260px; gap: 12px; height: calc(100vh - 56px); padding: 12px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .sidebar { grid-area: sidebar; display:flex; flex-direction:column; gap:12px; }
+    .canvas { grid-area: canvas; display:flex; flex-direction:column; gap:8px; }
+    .inspector { grid-area: inspector; overflow:auto; }
+    .drawer { grid-area: drawer; display:flex; flex-direction:column; }
+    #graphWrap { position:relative; }
+    #graph { width: 100%; height: 520px; border: 1px solid var(--border); border-radius: 10px; background: linear-gradient(180deg, #fafafa, #f5f6f8); }
+    #minimap { position:absolute; right:12px; bottom:12px; width:180px; height:120px; background:#ffffffaa; border:1px solid var(--border); border-radius:8px; backdrop-filter: blur(4px); }
+    label { display: block; margin-top: 8px; font-weight: 600; }
+    input[type=file] { margin-top: 4px; }
+    button { margin-top: 8px; padding: 8px 12px; border: 1px solid #d1d5db; background: #111827; color: white; border-radius: 6px; cursor: pointer; }
+    button.secondary { background: #fff; color: #111827; }
+    button:hover { filter: brightness(1.05); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; vertical-align: top; }
+    .small { color: #6b7280; font-size: 12px; }
+    .amb { background: #fff7ed; border: 1px solid #fed7aa; padding: 8px; border-radius: 6px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    select { padding: 4px; }
+    .hops { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #374151; }
+    .legend { font-size: 12px; color: #6b7280; margin-top: 6px; }
+    .btn-col { padding: 4px 8px; border: 1px solid #d1d5db; background: #f3f4f6; color: #111827; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .btn-col:hover { background: #e5e7eb; }
+    .hop-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .hop-box { padding: 3px 6px; border: 1px solid #cbd5e1; background: #f8fafc; color: #0f172a; border-radius: 6px; font-size: 12px; box-shadow: 0 1px 1px rgba(0,0,0,0.03); }
+    .hop-box.sink { background: #dbeafe; border-color: #93c5fd; }
+    .hop-arrow { color: #6b7280; font-size: 14px; }
+    .tabs { display:flex; border-bottom:1px solid var(--border); gap:4px; }
+    .tabs button { background:#fff; color:#111; border-radius:6px 6px 0 0; border:1px solid var(--border); border-bottom:none; margin-top:0; }
+    .tabs button.active { background:#f8fafc; }
+    .tab-body { flex:1; overflow:auto; padding:8px; background:#f8fafc; border:1px solid var(--border); border-radius:0 8px 8px 8px; }
+    .pill { display:inline-block; padding:2px 6px; border:1px solid var(--border); border-radius:999px; font-size:12px; color:#374151; background:#f3f4f6; }
+    .badge { font-size:10px; padding:2px 6px; border-radius:999px; background:#e5e7eb; color:#111827; border:1px solid #cbd5e1; }
+    .node-rect { transition: stroke-width 120ms ease, fill 150ms ease; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="pill">SQL Lineage Explorer</div>
+    <div class="grow"></div>
+    <div class="ctrl">
+      <input id="file" type="file" accept="application/json" />
+      <input id="search" placeholder="Search nodes/columns..." />
+      <button id="analyzeBtn">Analyze</button>
+      <button id="reapplyBtn" class="secondary">Re-Analyze</button>
+      <button id="exportPngBtn" class="secondary">Export PNG</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="panel">
+        <div class="small" id="sinkInfo"></div>
+        <div class="row small"><label style="margin:0">View</label>
+          <select id="layoutMode"><option value="auto">Auto (L→R)</option><option value="locked">Locked</option></select>
+          <label class="small" style="margin:0 0 0 6px"><input type="checkbox" id="traceToggle"/> Trace Column</label>
+        </div>
+        <div id="filters" class="small" style="margin-top:6px">
+          <label style="margin:0">Filters</label>
+          <div><input type="checkbox" id="fPath"/> Only path-to-sink</div>
+          <div><input type="checkbox" id="fWarn"/> Only warnings</div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1; overflow:auto">
+        <strong>Nodes</strong>
+        <ul id="nodesList" style="list-style:none; padding-left:0;"></ul>
+      </div>
+      <div class="panel">
+        <strong>Warnings</strong>
+        <div id="warnList" class="small"></div>
+      </div>
+    </aside>
+    <section class="canvas">
+      <div id="graphWrap">
+        <div id="graph"></div>
+        <div id="minimap"></div>
+      </div>
+      <div class="legend">Tip: scroll to zoom, drag to pan. Click a node to view its SQL. Click a column button to highlight its path.</div>
+      <div style="margin-top:8px;">
+        <strong>Selected Alias SQL</strong>
+        <pre id="aliasSql" style="max-height:180px; overflow:auto; background:#f3f4f6; padding:8px; border:1px solid #e5e7eb; border-radius:6px;"></pre>
+      </div>
+      <div id="breadcrumbs" class="small"></div>
+      <h4>Sink Columns</h4>
+      <table>
+        <thead>
+          <tr><th>Column</th><th>Sources</th><th>Expr</th><th>Influences</th><th>Hops</th></tr>
+        </thead>
+        <tbody id="colsBody"></tbody>
+      </table>
+    </section>
+    <aside class="inspector panel">
+      <h4>Node Inspector</h4>
+      <div id="insSummary" class="small"></div>
+      <h5>Operation</h5>
+      <pre id="insSQL" style="white-space:pre-wrap"></pre>
+      <h5>Schema</h5>
+      <div id="insSchema" class="small"></div>
+      <h5>Derivations</h5>
+      <div id="insDeriv" class="small"></div>
+    </aside>
+    <section class="drawer">
+      <div class="tabs">
+        <button class="tabBtn active" data-tab="matrix">Lineage Matrix</button>
+        <button class="tabBtn" data-tab="preview">Data Preview</button>
+        <button class="tabBtn" data-tab="profiles">Profiles</button>
+        <button class="tabBtn" data-tab="logs">Logs/Validations</button>
+      </div>
+      <div class="tab-body">
+        <div id="tab-matrix"></div>
+        <div id="tab-preview" style="display:none" class="small">Preview not available (requires runtime access). Configure row-limit and masking here.</div>
+        <div id="tab-profiles" style="display:none" class="small">Profiles placeholder. Show count, distinct, nulls, min/max, histograms per node/column.</div>
+        <div id="tab-logs" style="display:none" class="small">Logs/Validations placeholder. Show tests, assertions, warnings per step.</div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    let lastJsonText = null;
+    let lastResult = null;
+    const resolutions = {}; // key -> qualifier
+    let currentHighlight = new Set();
+    let queriesMap = {}; // alias -> sql
+    let nodeTypes = {}; let schemas = {}; let derivations = {};
+
+    function readFileText(file) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = reject;
+        r.readAsText(file);
+      });
+    }
+
+    async function analyze(withResolutions=false) {
+      const file = document.getElementById('file').files[0];
+      if (!file && !lastJsonText) { alert('Please choose a queries.json'); return; }
+      if (file) lastJsonText = await readFileText(file);
+      const form = new FormData();
+      form.append('json_text', lastJsonText);
+      if (withResolutions) form.append('resolutions', JSON.stringify(resolutions));
+      const res = await fetch('/analyze', { method: 'POST', body: form });
+      const data = await res.json();
+      lastResult = data;
+      queriesMap = data.queries_map || {};
+      nodeTypes = data.node_types || {}; schemas = data.schemas || {}; derivations = data.derivations || {};
+      renderResult(data);
+    }
+
+    function renderResult(data) {
+      const sinkInfo = document.getElementById('sinkInfo');
+      sinkInfo.textContent = data.sink ? `Detected sink: ${data.sink}` : '';
+
+      // Nodes list
+      const ul = document.getElementById('nodesList'); ul.innerHTML = '';
+      data.aliases.forEach(a => {
+        const li = document.createElement('li');
+        const b = document.createElement('span'); b.className = 'badge'; b.textContent = (nodeTypes[a]||'custom');
+        li.textContent = a + ' '; li.appendChild(b);
+        li.style.cursor='pointer';
+        li.onclick = () => selectNode(a);
+        ul.appendChild(li);
+      });
+
+      // Columns table
+      const tbody = document.getElementById('colsBody');
+      tbody.innerHTML = '';
+      data.columns.forEach(c => {
+        const tr = document.createElement('tr');
+        const tdName = document.createElement('td');
+        const nameBtn = document.createElement('button');
+        nameBtn.className = 'btn-col';
+        nameBtn.textContent = c.name;
+        nameBtn.onclick = (e) => { e.preventDefault(); highlightColumn(c); };
+        tdName.appendChild(nameBtn);
+        const tdSources = document.createElement('td');
+        tdSources.textContent = c.sources.join(', ');
+        const tdExpr = document.createElement('td');
+        tdExpr.textContent = c.expr || '';
+        const tdInfl = document.createElement('td');
+        const parts = [];
+        if (c.influences.where && c.influences.where.length) parts.push('where: ' + c.influences.where.join(', '));
+        if (c.influences.join && c.influences.join.length) parts.push('join: ' + c.influences.join.join(', '));
+        if (c.influences.group_by && c.influences.group_by.length) parts.push('group_by: ' + c.influences.group_by.join(', '));
+        if (c.influences.order_by && c.influences.order_by.length) parts.push('order_by: ' + c.influences.order_by.join(', '));
+        tdInfl.innerHTML = parts.join('<br/>');
+        const tdHops = document.createElement('td');
+        const flow = document.createElement('div');
+        flow.className = 'hop-flow';
+        (c.hops || []).forEach((h, idx) => {
+          const box = document.createElement('div');
+          box.className = 'hop-box' + (idx === 0 ? ' sink' : '');
+          box.textContent = `${h.alias}.${h.column}`;
+          flow.appendChild(box);
+          if (idx < c.hops.length - 1) {
+            const arr = document.createElement('span');
+            arr.className = 'hop-arrow';
+            arr.textContent = '→';
+            flow.appendChild(arr);
+          }
+        });
+        tdHops.appendChild(flow);
+        tr.appendChild(tdName); tr.appendChild(tdSources); tr.appendChild(tdExpr); tr.appendChild(tdInfl); tr.appendChild(tdHops);
+        tbody.appendChild(tr);
+      });
+
+      // Ambiguities
+      const ambDiv = document.getElementById('ambContainer');
+      if (data.ambiguities && data.ambiguities.length) {
+        ambDiv.style.display = 'block';
+        ambDiv.innerHTML = '<strong>Ambiguities found</strong><div class="small">Choose a qualifier per reference, then click "Re-Analyze with Resolutions".</div>';
+        data.ambiguities.forEach(a => {
+          const row = document.createElement('div'); row.className = 'row';
+          const label = document.createElement('div');
+          label.textContent = `${a.message}`;
+          row.appendChild(label);
+          const sel = document.createElement('select');
+          a.options.forEach(opt => { const o = document.createElement('option'); o.value = opt; o.textContent = opt; sel.appendChild(o); });
+          sel.onchange = (e) => { resolutions[a.key] = e.target.value; };
+          if (resolutions[a.key]) sel.value = resolutions[a.key];
+          row.appendChild(sel);
+          ambDiv.appendChild(row);
+        });
+      } else {
+        ambDiv.style.display = 'none';
+        ambDiv.innerHTML = '';
+      }
+
+      // Matrix tab
+      renderMatrix(data);
+
+      // Graph
+      drawGraph(data.aliases, data.edges, currentHighlight, data.sink);
+    }
+
+    function drawGraph(nodes, edges, highlightSet=new Set(), sinkAlias='') {
+      const el = document.getElementById('graph');
+      el.innerHTML = '';
+      const w = el.clientWidth; const h = el.clientHeight;
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('width', w); svg.setAttribute('height', h);
+
+      // defs: arrowhead + shadow
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+      marker.setAttribute('id', 'arrow'); marker.setAttribute('markerWidth', '10'); marker.setAttribute('markerHeight', '7');
+      marker.setAttribute('refX', '10'); marker.setAttribute('refY', '3.5'); marker.setAttribute('orient', 'auto');
+      const arrowPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      arrowPath.setAttribute('d', 'M0,0 L10,3.5 L0,7 Z'); arrowPath.setAttribute('fill', '#94a3b8');
+      marker.appendChild(arrowPath); defs.appendChild(marker);
+      const filter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
+      filter.setAttribute('id', 'shadow'); filter.setAttribute('x', '-20%'); filter.setAttribute('y', '-20%'); filter.setAttribute('width', '140%'); filter.setAttribute('height', '140%');
+      const feDrop = document.createElementNS('http://www.w3.org/2000/svg', 'feDropShadow');
+      feDrop.setAttribute('dx', '0'); feDrop.setAttribute('dy', '1'); feDrop.setAttribute('stdDeviation', '1.2'); feDrop.setAttribute('flood-opacity', '0.25');
+      filter.appendChild(feDrop); defs.appendChild(filter);
+      svg.appendChild(defs);
+
+      // layout
+      const adj = new Map(); const indeg = new Map(); const depth = new Map();
+      nodes.forEach(n => { adj.set(n, []); indeg.set(n, 0); depth.set(n, 0); });
+      edges.forEach(e => { if (adj.has(e.from)) adj.get(e.from).push(e.to); if (indeg.has(e.to)) indeg.set(e.to, (indeg.get(e.to)||0)+1); });
+      const q = []; nodes.forEach(n => { if ((indeg.get(n)||0) === 0) q.push(n); });
+      while (q.length) { const u = q.shift(); const du = depth.get(u) || 0; (adj.get(u)||[]).forEach(v => { depth.set(v, Math.max(depth.get(v)||0, du + 1)); indeg.set(v, indeg.get(v)-1); if (indeg.get(v) === 0) q.push(v); }); }
+      const cols = new Map(); nodes.forEach(n => { const d = depth.get(n) || 0; if (!cols.has(d)) cols.set(d, []); cols.get(d).push(n); });
+      const colKeys = Array.from(cols.keys()).sort((a,b)=>a-b); colKeys.forEach(k => cols.get(k).sort());
+      const marginX = 40, marginY = 40, nodeW = 200, nodeH = 36, colGap = 120, rowGap = 24;
+      const pos = {}; colKeys.forEach((k, ci) => { const list = cols.get(k); const colX = marginX + ci * (nodeW + colGap); const totalH = list.length * nodeH + (list.length - 1) * rowGap; let y0 = Math.max(marginY, (h - totalH) / 2); list.forEach((n, i) => { pos[n] = { x: colX, y: y0 + i*(nodeH + rowGap) }; }); });
+
+      const gAll = document.createElementNS('http://www.w3.org/2000/svg', 'g'); svg.appendChild(gAll);
+      let scale = 1.0, tx = 0, ty = 0; const applyTransform = () => gAll.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`); applyTransform();
+
+      // edges (sankey-ish)
+      edges.forEach(e => { const s = pos[e.from]; const t = pos[e.to]; if (!s || !t) return; const x1 = s.x + nodeW; const y1 = s.y + nodeH/2; const x2 = t.x; const y2 = t.y + nodeH/2; const mid = (x1 + x2) / 2; const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); const d = `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`; path.setAttribute('d', d); path.setAttribute('stroke', '#94a3b8'); path.setAttribute('fill', 'none'); path.setAttribute('stroke-width', '2'); path.setAttribute('marker-end', 'url(#arrow)'); gAll.appendChild(path); });
+
+      // nodes
+      nodes.forEach(n => { const g = document.createElementNS('http://www.w3.org/2000/svg', 'g'); const p = pos[n]; const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect'); rect.setAttribute('x', p.x); rect.setAttribute('y', p.y); rect.setAttribute('rx', '8'); rect.setAttribute('ry', '8'); rect.setAttribute('width', nodeW); rect.setAttribute('height', nodeH); let fill = '#eef2ff'; if (highlightSet && highlightSet.has(n)) fill = '#fde68a'; if (sinkAlias && n === sinkAlias) fill = '#bfdbfe'; rect.setAttribute('fill', fill); rect.setAttribute('stroke', '#64748b'); rect.setAttribute('filter', 'url(#shadow)'); rect.setAttribute('class', 'node-rect'); rect.style.cursor = 'pointer'; const text = document.createElementNS('http://www.w3.org/2000/svg', 'text'); text.setAttribute('x', p.x + 12); text.setAttribute('y', p.y + 22); text.setAttribute('fill', '#0f172a'); text.textContent = n; text.style.userSelect = 'none'; g.addEventListener('mouseenter', () => { rect.setAttribute('stroke-width', '2.5'); }); g.addEventListener('mouseleave', () => { rect.setAttribute('stroke-width', '1'); }); g.addEventListener('click', () => selectNode(n)); g.appendChild(rect); g.appendChild(text); gAll.appendChild(g); });
+
+      // zoom + pan
+      let dragging = false, lx = 0, ly = 0; svg.addEventListener('wheel', (ev) => { ev.preventDefault(); const delta = -Math.sign(ev.deltaY) * 0.1; const newScale = Math.min(2.0, Math.max(0.5, scale + delta)); const rect = svg.getBoundingClientRect(); const cx = ev.clientX - rect.left; const cy = ev.clientY - rect.top; const dx = cx - tx; const dy = cy - ty; tx = cx - (dx * newScale / scale); ty = cy - (dy * newScale / scale); scale = newScale; applyTransform(); }, { passive: false }); svg.addEventListener('mousedown', (ev) => { dragging = true; lx = ev.clientX; ly = ev.clientY; }); svg.addEventListener('mousemove', (ev) => { if (!dragging) return; tx += (ev.clientX - lx); ty += (ev.clientY - ly); lx = ev.clientX; ly = ev.clientY; applyTransform(); }); svg.addEventListener('mouseup', ()=> dragging=false); svg.addEventListener('mouseleave', ()=> dragging=false);
+
+      el.appendChild(svg);
+
+      // minimap
+      const mini = document.getElementById('minimap'); mini.innerHTML = ''; const msvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); msvg.setAttribute('width', mini.clientWidth); msvg.setAttribute('height', mini.clientHeight); const bx = {minX: Infinity, minY: Infinity, maxX:-Infinity, maxY:-Infinity}; nodes.forEach(n => { const p = pos[n]; bx.minX=Math.min(bx.minX,p.x); bx.minY=Math.min(bx.minY,p.y); bx.maxX=Math.max(bx.maxX,p.x+nodeW); bx.maxY=Math.max(bx.maxY,p.y+nodeH); }); const sx = (mini.clientWidth-10)/Math.max(1,bx.maxX-bx.minX); const sy=(mini.clientHeight-10)/Math.max(1,bx.maxY-bx.minY); const ms = Math.min(sx,sy); nodes.forEach(n => { const p = pos[n]; const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect'); r.setAttribute('x', 5 + (p.x - bx.minX)*ms); r.setAttribute('y', 5 + (p.y - bx.minY)*ms); r.setAttribute('width', nodeW*ms); r.setAttribute('height', nodeH*ms); r.setAttribute('fill', '#e5e7eb'); r.setAttribute('stroke', '#9ca3af'); msvg.appendChild(r); }); mini.appendChild(msvg);
+    }
+
+    function highlightColumn(col) {
+      const aliases = new Set(); (col.hops || []).forEach(h => { if (h.alias) aliases.add(h.alias); }); currentHighlight = aliases; drawGraph(lastResult.aliases, lastResult.edges, currentHighlight, lastResult.sink);
+      const bc = document.getElementById('breadcrumbs'); bc.innerHTML = ''; const frag = []; (col.hops || []).forEach((h, idx) => { frag.push(`<span class=\"pill\">${h.alias}.${h.column}</span>`); if (idx < col.hops.length-1) frag.push(' → '); }); bc.innerHTML = frag.join('');
+    }
+
+    function selectNode(n) {
+      document.getElementById('aliasSql').textContent = queriesMap[n] || '(SQL not available)';
+      const inputs = (lastResult.edges.filter(e => e.to === n).map(e => e.from)).join(', '); const outputs = (lastResult.edges.filter(e => e.from === n).map(e => e.to)).join(', ');
+      const type = (lastResult.node_types||{})[n] || 'custom';
+      document.getElementById('insSummary').innerHTML = `Type: <strong>${type}</strong><br/>Inputs: ${inputs||'-'}<br/>Outputs: ${outputs||'-'}`;
+      const schema = (schemas[n]||[]).map(c=>`<div>${c}</div>`).join(''); document.getElementById('insSchema').innerHTML = schema || '<span class="small">No schema</span>';
+      const der = derivations[n] || {}; const rows=[]; Object.keys(der).forEach(k=>{ rows.push(`<div><strong>${k}</strong> = <code>${der[k].expr||''}</code></div>`); }); document.getElementById('insDeriv').innerHTML = rows.join('') || '<span class="small">No derivations</span>';
+    }
+
+    function renderMatrix(data) {
+      const root = document.getElementById('tab-matrix'); const aliases = data.aliases; const cols = data.columns.map(c=>c.name); const table = document.createElement('table'); const thead = document.createElement('thead'); const thr = document.createElement('tr'); thr.appendChild(document.createElement('th')); cols.forEach(c=>{ const th = document.createElement('th'); th.textContent=c; thr.appendChild(th); }); thead.appendChild(thr); table.appendChild(thead); const tbody = document.createElement('tbody'); aliases.forEach(a=>{ const tr = document.createElement('tr'); const td0=document.createElement('td'); td0.textContent=a; tr.appendChild(td0); cols.forEach(cn=>{ const td = document.createElement('td'); let val = ''; const der = derivations[a]||{}; if (der[cn]) val = 'transform'; if (((data.node_types||{})[a]||'')==='join') val = 'join'; if ((data.sink===a) && data.columns.find(x=>x.name===cn)) val = val||'direct'; td.textContent = val; td.className = 'small'; td.style.cursor='pointer'; td.onclick = () => { const col = data.columns.find(x=>x.name===cn); if (col) highlightColumn(col); selectNode(a); }; tr.appendChild(td); }); tbody.appendChild(tr); }); table.appendChild(tbody); root.innerHTML=''; root.appendChild(table);
+    }
+
+    // Tabs
+    document.addEventListener('click', (e)=>{ const btn = e.target.closest('.tabBtn'); if (!btn) return; document.querySelectorAll('.tabBtn').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); const id = btn.dataset.tab; document.getElementById('tab-matrix').style.display = (id==='matrix')?'block':'none'; document.getElementById('tab-preview').style.display = (id==='preview')?'block':'none'; document.getElementById('tab-profiles').style.display = (id==='profiles')?'block':'none'; document.getElementById('tab-logs').style.display = (id==='logs')?'block':'none'; });
+
+    // Search
+    document.getElementById('search').addEventListener('input', (e)=>{ const q = e.target.value.toLowerCase(); document.querySelectorAll('#nodesList li').forEach(li=>{ li.style.display = li.textContent.toLowerCase().includes(q) ? '' : 'none'; }); });
+
+    // Export PNG
+    document.getElementById('exportPngBtn').onclick = () => { const svg = document.querySelector('#graph svg'); if (!svg) return; const xml = new XMLSerializer().serializeToString(svg); const img = new Image(); const blob = new Blob([xml], {type:'image/svg+xml;charset=utf-8'}); const url = URL.createObjectURL(blob); img.onload = function(){ const canvas = document.createElement('canvas'); canvas.width = svg.viewBox.baseVal.width || svg.clientWidth; canvas.height = svg.viewBox.baseVal.height || svg.clientHeight; const ctx = canvas.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.drawImage(img,0,0); URL.revokeObjectURL(url); canvas.toBlob((b)=>{ const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'lineage.png'; a.click(); }); }; img.src = url; };
+
+    document.getElementById('analyzeBtn').onclick = () => analyze(false);
+    document.getElementById('reapplyBtn').onclick = () => analyze(true);
+  </script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+/* Minimal placeholder; styles mostly inline in template */
+html, body { background: #f3f4f6; }
+.node-rect { transition: stroke-width 120ms ease, fill 150ms ease; }

@@ -1,0 +1,25 @@
+{
+    "queries":[
+        {
+            "alias": "accounts",
+            "query": "select id, name, account_type, opening_date from db.accounts"
+        },
+        {
+            "alias": "transactions",
+            "query": "select account_id, amount, txn_date, sender_account_id, receiver_account_id from db.transactions"
+        },
+        {
+            "alias": "transactions_of_accounts",
+            "query": "select * from accounts left join transactions on accounts.id = transactions.account_id where transactions.date_partition = '2025-10-01'"
+        },
+        {
+            "alias": "aggregated_transactions",
+            "query": "select account_id, account_type, sum(amount) from transactions_of_accounts"
+        },
+        {
+            "alias": "retail_accounts_transactions",
+            "type": "sink",
+            "query": "select * from aggregated_transactions where account_type = 'retail'"
+        }
+    ]
+}
