@@ -25,8 +25,28 @@ def build_parsed_queries(specs: List[QuerySpec]) -> Dict[str, ParsedQuery]:
     alias_to_query: Dict[str, ParsedQuery] = {}
     for spec in specs:
         parsed = parse_sql(spec.sql, spec.alias, [])
+        if spec.alias in alias_to_query:
+            raise ValueError(f"Duplicate query alias: {spec.alias}")
         alias_to_query[spec.alias] = parsed
-    return alias_to_query
+    # Resolve upstream stages before their consumers, regardless of JSON order.
+    ordered: Dict[str, ParsedQuery] = {}
+    visiting: Set[str] = set()
+
+    def visit(alias: str) -> None:
+        if alias in ordered:
+            return
+        if alias in visiting:
+            raise ValueError(f"Cyclic query dependency involving {alias}")
+        visiting.add(alias)
+        for source in alias_to_query[alias].sources:
+            if source in alias_to_query:
+                visit(source)
+        visiting.remove(alias)
+        ordered[alias] = alias_to_query[alias]
+
+    for alias in alias_to_query:
+        visit(alias)
+    return ordered
 
 
 def _resolve_schema_for_base(parsed: ParsedQuery) -> Optional[AliasSchema]:

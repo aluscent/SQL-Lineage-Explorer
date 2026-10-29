@@ -11,7 +11,7 @@ def _try_import_sqlglot():
         import sqlglot  # type: ignore
         from sqlglot import exp
         return sqlglot, exp
-    except Exception:
+    except ImportError:
         return None, None
 
 
@@ -95,22 +95,28 @@ def _find_column_refs(expr_sql: str, in_scope: List[str]) -> List[ColumnRef]:
 
 
 def parse_sql(sql: str, alias: str, in_scope_aliases: List[str]) -> ParsedQuery:
+    # Scope-aware nested-query resolution is not implemented. Refuse to
+    # manufacture lineage by mixing columns from different SELECT scopes.
+    structural_sql = re.sub(r"'(?:''|[^'])*'|--[^\n]*|/\*.*?\*/", " ", sql, flags=re.S)
+    if re.search(r"\b(with|union|intersect|except)\b|\(\s*select\b", structural_sql, re.I):
+        raise ValueError("Nested queries, CTEs and set operations are not supported; split them into named query stages")
+    fallback_reason = "SQLGlot is unavailable; heuristic lineage may be incomplete"
     # Try sqlglot first
     sqlglot, exp = _try_import_sqlglot()
     if sqlglot:
         try:
             parsed = sqlglot.parse_one(sql, read="spark")
-            sources = []
-            for s in parsed.find_all(exp.Table):
-                if s.alias:
-                    sources.append(s.alias)
-                else:
-                    sources.append(s.name)
-            # Fallback if no sources collected, inspect FROMs
-            if not sources:
-                for s in parsed.find_all(exp.From):
-                    for t in s.find_all(exp.Table):
-                        sources.append(t.alias or t.name)
+            if not isinstance(parsed, exp.Select):
+                raise ValueError("Only SELECT queries are supported")
+            source_map = {}
+            for table in parsed.find_all(exp.Table):
+                physical = ".".join(part.name for part in table.parts)
+                source_map[table.alias_or_name] = physical
+            sources = list(dict.fromkeys(source_map.values()))
+
+            def column_ref(column):
+                qualifier = column.table or None
+                return ColumnRef(source_map.get(qualifier, qualifier), column.name)
 
             projections: List[Projection] = []
             select = parsed.find(exp.Select)
@@ -119,16 +125,18 @@ def parse_sql(sql: str, alias: str, in_scope_aliases: List[str]) -> ParsedQuery:
                     is_star = bool(e.is_star) if hasattr(e, "is_star") else False
                     alias_name = e.alias_or_name
                     expr_sql = e.sql(dialect="spark")
+                    if is_star and expr_sql.endswith(".*"):
+                        expr_sql = source_map.get(expr_sql[:-2], expr_sql[:-2]) + ".*"
                     inputs: List[ColumnRef] = []
                     is_aggr = e.find(exp.AggFunc) is not None
                     is_win = e.find(exp.Window) is not None
-                    is_lit = e.is_number or e.is_string if hasattr(e, "is_number") else False
+                    is_lit = isinstance(e.unalias(), (exp.Literal, exp.Null, exp.Boolean))
                     if not is_star:
                         # Collect referenced columns
                         for c in e.find_all(exp.Column):
                             q = c.table or None
                             n = c.name
-                            inputs.append(ColumnRef(q, n))
+                            inputs.append(column_ref(c))
                     projections.append(
                         Projection(
                             output_name=alias_name,
@@ -144,25 +152,29 @@ def parse_sql(sql: str, alias: str, in_scope_aliases: List[str]) -> ParsedQuery:
             where = parsed.args.get("where")
             if where:
                 for c in where.find_all(exp.Column):
-                    infl.where_cols.append(ColumnRef(c.table or None, c.name))
+                    infl.where_cols.append(column_ref(c))
             for j in parsed.find_all(exp.Join):
                 on = j.args.get("on")
                 if on:
                     for c in on.find_all(exp.Column):
-                        infl.join_cols.append(ColumnRef(c.table or None, c.name))
+                        infl.join_cols.append(column_ref(c))
             gb = parsed.args.get("group")
             if gb:
                 for c in gb.find_all(exp.Column):
-                    infl.group_by_cols.append(ColumnRef(c.table or None, c.name))
+                    infl.group_by_cols.append(column_ref(c))
             ob = parsed.args.get("order")
             if ob:
                 for c in ob.find_all(exp.Column):
-                    infl.order_by_cols.append(ColumnRef(c.table or None, c.name))
-            return ParsedQuery(alias=alias, sources=sources, projections=projections, influences=infl)
-        except Exception:
-            pass
+                    infl.order_by_cols.append(column_ref(c))
+            return ParsedQuery(alias=alias, sources=sources, projections=projections,
+                               influences=infl, parser_mode="sqlglot")
+        except sqlglot.errors.ParseError as error:
+            # Invalid SQL must not become plausible-looking heuristic lineage.
+            raise ValueError("SQLGlot could not parse the SELECT query") from error
 
     # Minimal fallback parser
+    if not re.match(r"^\s*select\b", sql, re.I):
+        raise ValueError("Only SELECT queries are supported")
     # Normalize whitespace
     norm = re.sub(r"\s+", " ", sql.strip())
     sel = _extract_between(norm, r"\bselect\b", [r"\bfrom\b"])
@@ -214,4 +226,5 @@ def parse_sql(sql: str, alias: str, in_scope_aliases: List[str]) -> ParsedQuery:
         infl.where_cols = _find_column_refs(where, in_scope)
     for _, on_expr in join_parts:
         infl.join_cols.extend(_find_column_refs(on_expr, in_scope))
-    return ParsedQuery(alias=alias, sources=sources, projections=projections, influences=infl)
+    return ParsedQuery(alias=alias, sources=sources, projections=projections, influences=infl,
+                       parser_mode="heuristic", warnings=[fallback_reason])

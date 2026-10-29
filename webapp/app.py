@@ -14,6 +14,18 @@ from lineage.models import BuildContext
 
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
+
+
+@app.errorhandler(ValueError)
+def invalid_input(error):
+    return jsonify(error=str(error)), 400
+
+
+@app.errorhandler(413)
+def input_too_large(error):
+    return jsonify(error="Queries payload exceeds 1 MiB"), 413
+
 
 
 def _load_specs_from_req() -> Tuple[List[dict], str]:
@@ -22,13 +34,29 @@ def _load_specs_from_req() -> Tuple[List[dict], str]:
         data_text = request.form["json_text"]
     elif "file" in request.files:
         f = request.files["file"]
-        data_text = f.read().decode("utf-8")
+        try:
+            data_text = f.read().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Queries file must use UTF-8") from error
     if not data_text:
         raise ValueError("No queries JSON provided")
     data = json.loads(data_text)
     if not isinstance(data, dict) or "queries" not in data:
         raise ValueError("Invalid JSON: expected object with 'queries' array")
-    return data["queries"], data_text
+    queries = data["queries"]
+    if not isinstance(queries, list) or not 1 <= len(queries) <= 100:
+        raise ValueError("Provide between 1 and 100 queries")
+    aliases = set()
+    for query in queries:
+        if not isinstance(query, dict):
+            raise ValueError("Each query must be an object")
+        alias, sql = query.get("alias"), query.get("query")
+        if not isinstance(alias, str) or not alias.strip() or alias in aliases:
+            raise ValueError("Query aliases must be unique non-empty strings")
+        if not isinstance(sql, str) or not sql.strip() or len(sql) > 50000:
+            raise ValueError("Each query needs non-empty SQL of at most 50000 characters")
+        aliases.add(alias)
+    return queries, data_text
 
 
 def _alias_edges(alias_to_query: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -104,12 +132,19 @@ def analyze():
     resolutions_json = request.form.get("resolutions")
     resolutions: Dict[str, str] = json.loads(resolutions_json) if resolutions_json else {}
 
+    if not isinstance(resolutions, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in resolutions.items()
+    ):
+        raise ValueError("Resolutions must map strings to strings")
+
     # Use core lineage
     from lineage.models import QuerySpec as QS
 
     specs_objs = [QS(alias=s["alias"], sql=s["query"], type=s.get("type")) for s in specs]
     alias_sql_map = {s.alias: s.sql for s in specs_objs}
     sink = sink_override or find_sink_alias(specs_objs)
+    if sink not in alias_sql_map:
+        raise ValueError("Selected sink is not a query alias")
     ctx = BuildContext()
     ctx.disambiguation = resolutions
     ctx.alias_to_query = build_parsed_queries(specs_objs)
@@ -119,6 +154,8 @@ def analyze():
 
     payload = {
         "sink": sink,
+        "diagnostics": {a: {"parser": p.parser_mode, "warnings": p.warnings}
+                        for a, p in ctx.alias_to_query.items()},
         "aliases": list(ctx.alias_to_query.keys()),
         "edges": _alias_edges(ctx.alias_to_query),
         "queries_map": alias_sql_map,
@@ -160,4 +197,4 @@ def analyze():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=False)
