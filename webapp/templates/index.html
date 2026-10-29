@@ -116,15 +116,15 @@
     <section class="drawer">
       <div class="tabs">
         <button class="tabBtn active" data-tab="matrix">Lineage Matrix</button>
-        <button class="tabBtn" data-tab="preview">Data Preview</button>
-        <button class="tabBtn" data-tab="profiles">Profiles</button>
-        <button class="tabBtn" data-tab="logs">Logs/Validations</button>
+        <button disabled title="Requires a separate runtime integration">Data Preview (unavailable)</button>
+        <button disabled title="Requires a separate runtime integration">Profiles (unavailable)</button>
+        <button class="tabBtn" data-tab="logs">Parser diagnostics</button>
       </div>
       <div class="tab-body">
         <div id="tab-matrix"></div>
         <div id="tab-preview" style="display:none" class="small">Preview not available (requires runtime access). Configure row-limit and masking here.</div>
         <div id="tab-profiles" style="display:none" class="small">Profiles placeholder. Show count, distinct, nulls, min/max, histograms per node/column.</div>
-        <div id="tab-logs" style="display:none" class="small">Logs/Validations placeholder. Show tests, assertions, warnings per step.</div>
+        <div id="tab-logs" style="display:none" class="small">Analyze a query file to see parser modes and warnings.</div>
       </div>
     </section>
   </div>
@@ -155,6 +155,7 @@
       if (withResolutions) form.append('resolutions', JSON.stringify(resolutions));
       const res = await fetch('/analyze', { method: 'POST', body: form });
       const data = await res.json();
+      if (!res.ok) { alert(data.error || 'Analysis failed'); return; }
       lastResult = data;
       queriesMap = data.queries_map || {};
       nodeTypes = data.node_types || {}; schemas = data.schemas || {}; derivations = data.derivations || {};
@@ -164,6 +165,14 @@
     function renderResult(data) {
       const sinkInfo = document.getElementById('sinkInfo');
       sinkInfo.textContent = data.sink ? `Detected sink: ${data.sink}` : '';
+
+      const diagnostics = document.getElementById('tab-logs');
+      diagnostics.replaceChildren();
+      Object.entries(data.diagnostics || {}).forEach(([alias, diagnostic]) => {
+        const line = document.createElement('p');
+        line.textContent = `${alias}: ${diagnostic.parser}. ${(diagnostic.warnings || []).join(' ')}`;
+        diagnostics.appendChild(line);
+      });
 
       // Nodes list
       const ul = document.getElementById('nodesList'); ul.innerHTML = '';
@@ -197,7 +206,7 @@
         if (c.influences.join && c.influences.join.length) parts.push('join: ' + c.influences.join.join(', '));
         if (c.influences.group_by && c.influences.group_by.length) parts.push('group_by: ' + c.influences.group_by.join(', '));
         if (c.influences.order_by && c.influences.order_by.length) parts.push('order_by: ' + c.influences.order_by.join(', '));
-        tdInfl.innerHTML = parts.join('<br/>');
+        tdInfl.textContent = parts.join(' | ');
         const tdHops = document.createElement('td');
         const flow = document.createElement('div');
         flow.className = 'hop-flow';
@@ -300,16 +309,30 @@
 
     function highlightColumn(col) {
       const aliases = new Set(); (col.hops || []).forEach(h => { if (h.alias) aliases.add(h.alias); }); currentHighlight = aliases; drawGraph(lastResult.aliases, lastResult.edges, currentHighlight, lastResult.sink);
-      const bc = document.getElementById('breadcrumbs'); bc.innerHTML = ''; const frag = []; (col.hops || []).forEach((h, idx) => { frag.push(`<span class=\"pill\">${h.alias}.${h.column}</span>`); if (idx < col.hops.length-1) frag.push(' → '); }); bc.innerHTML = frag.join('');
+      const bc = document.getElementById('breadcrumbs'); bc.replaceChildren();
+      (col.hops || []).forEach((h, idx) => {
+        if (idx) bc.appendChild(document.createTextNode(' → '));
+        const pill = document.createElement('span'); pill.className = 'pill';
+        pill.textContent = `${h.alias}.${h.column}`; bc.appendChild(pill);
+      });
     }
 
     function selectNode(n) {
       document.getElementById('aliasSql').textContent = queriesMap[n] || '(SQL not available)';
       const inputs = (lastResult.edges.filter(e => e.to === n).map(e => e.from)).join(', '); const outputs = (lastResult.edges.filter(e => e.from === n).map(e => e.to)).join(', ');
       const type = (lastResult.node_types||{})[n] || 'custom';
-      document.getElementById('insSummary').innerHTML = `Type: <strong>${type}</strong><br/>Inputs: ${inputs||'-'}<br/>Outputs: ${outputs||'-'}`;
-      const schema = (schemas[n]||[]).map(c=>`<div>${c}</div>`).join(''); document.getElementById('insSchema').innerHTML = schema || '<span class="small">No schema</span>';
-      const der = derivations[n] || {}; const rows=[]; Object.keys(der).forEach(k=>{ rows.push(`<div><strong>${k}</strong> = <code>${der[k].expr||''}</code></div>`); }); document.getElementById('insDeriv').innerHTML = rows.join('') || '<span class="small">No derivations</span>';
+      document.getElementById('insSummary').textContent = `Type: ${type}. Inputs: ${inputs || '-'}. Outputs: ${outputs || '-'}`;
+      const schemaNode = document.getElementById('insSchema'); schemaNode.replaceChildren();
+      (schemas[n] || []).forEach(column => {
+        const item = document.createElement('div'); item.textContent = column; schemaNode.appendChild(item);
+      });
+      if (!schemaNode.childNodes.length) schemaNode.textContent = 'No schema';
+      const derivationNode = document.getElementById('insDeriv'); derivationNode.replaceChildren();
+      Object.entries(derivations[n] || {}).forEach(([column, derivation]) => {
+        const item = document.createElement('div');
+        item.textContent = `${column} = ${derivation.expr || ''}`; derivationNode.appendChild(item);
+      });
+      if (!derivationNode.childNodes.length) derivationNode.textContent = 'No derivations';
     }
 
     function renderMatrix(data) {

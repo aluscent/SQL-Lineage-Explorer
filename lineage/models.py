@@ -51,6 +51,8 @@ class ParsedQuery:
     sources: List[str]  # list of source aliases or physical tables
     projections: List[Projection]
     influences: Influences = field(default_factory=Influences)
+    parser_mode: str = "unknown"
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass

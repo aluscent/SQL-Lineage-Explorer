@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any, Dict
 
 from .build import build_lineage, build_parsed_queries, build_schemas, lineage_for_sink
@@ -32,7 +33,10 @@ def main() -> None:
     build_lineage(ctx)
     lineage = lineage_for_sink(ctx, sink)
 
-    if ctx.ambiguities:
+    for alias, parsed in ctx.alias_to_query.items():
+        for warning in parsed.warnings:
+            print(f"{alias}: {warning}", file=sys.stderr)
+    if ctx.ambiguities and not args.as_json:
         print("Ambiguities detected; disambiguation required:")
         for a in ctx.ambiguities:
             print(f" - {a.message}  [key={a.key}] options={a.options}")
@@ -40,6 +44,8 @@ def main() -> None:
     if args.as_json:
         payload: Dict[str, Any] = {
             "sink": sink,
+            "diagnostics": {a: {"parser": p.parser_mode, "warnings": p.warnings}
+                            for a, p in ctx.alias_to_query.items()},
             "columns": [
                 {
                     "name": c.sink_column,

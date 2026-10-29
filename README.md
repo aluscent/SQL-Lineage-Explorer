@@ -128,3 +128,19 @@ MIT License – see `LICENSE`.
 
 Copyright (c) 2025 Pythonomics Contributors
 
+
+## Verified scope and regression suite
+
+Run `python -m pip install -r requirements.txt`, then
+`python -m unittest discover -s tests -v`. CI runs the same suite.
+
+The supported unit is a SELECT stage. Represent CTEs/subqueries as separate named
+stages in the input JSON; nested scopes and set operations are explicitly refused
+rather than mixed into misleading lineage. Physical table qualifiers are retained
+when SQL aliases are used. Unqualified multi-source columns remain ambiguous.
+
+JSON CLI and HTTP results include per-stage `diagnostics` with parser mode and
+warnings. Missing SQLGlot activates a deliberately limited heuristic parser;
+SQLGlot parse errors fail instead of silently switching parsers. This is static
+analysis, not query execution, runtime profiling, or a completeness guarantee.
+Web input is limited to 1 MiB and 100 stages; invalid input returns HTTP 400.
